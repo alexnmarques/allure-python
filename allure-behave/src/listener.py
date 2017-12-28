@@ -29,8 +29,9 @@ FIXTURES = BEFORE_FIXTURES + AFTER_FIXTURES
 
 
 class AllureListener(object):
-    def __init__(self):
+    def __init__(self, outputDir=None):
         self.logger = AllureReporter()
+
         self.current_step_uuid = None
         self.execution_context = Context()
         self.fixture_context = Context()

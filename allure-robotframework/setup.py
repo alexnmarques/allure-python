@@ -2,23 +2,12 @@ import os,sys
 from setuptools import setup
 from pkg_resources import require, DistributionNotFound, VersionConflict
 
-try:
-    require('pytest-allure-adaptor')
-    print("""
-    You have pytest-allure-adaptor installed.
-    You need to remove pytest-allure-adaptor from your site-packages
-    before installing allure-pytest, or conflicts may result.
-    """)
-    sys.exit()
-except (DistributionNotFound, VersionConflict):
-    pass
-
-PACKAGE = "allure-robot"
+PACKAGE = "allure-robotframework"
 VERSION = "2.2.4b1"
 
 classifiers = [
     'Development Status :: 4 - Beta',
-    'Framework :: Pytest',
+    'Framework :: Robot Framework',
     'Intended Audience :: Developers',
     'License :: OSI Approved :: Apache Software License',
     'Topic :: Software Development :: Quality Assurance',
@@ -40,7 +29,7 @@ def main():
     setup(
         name=PACKAGE,
         version=VERSION,
-        description="Allure pytest integration",
+        description="Allure robot framework integration",
         url="https://github.com/allure-framework/allure-python",
         author="QAMetaSoftware, Stanislav Seliverstov",
         author_email="sseliverstov@qameta.io",
@@ -48,9 +37,8 @@ def main():
         classifiers=classifiers,
         keywords="allure reporting robot framework",
         long_description=read('README.rst'),
-        packages=["allure_robot"],
-        package_dir={"allure_robot": "src"},
-        #entry_points={"pytest11": ["allure_pytest = allure_pytest.plugin"]},
+        packages=["allure_robotframework"],
+        package_dir={"allure_robotframework": "src"},
         install_requires=install_requires
     )
 

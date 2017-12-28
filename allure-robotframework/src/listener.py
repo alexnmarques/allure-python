@@ -6,13 +6,14 @@ from allure_commons.utils import represent
 from allure_commons.utils import platform_label
 from allure_commons.utils import host_tag, thread_tag
 from allure_commons.reporter import AllureReporter
+from allure_commons.logger import AllureFileLogger
 from allure_commons.model2 import TestStepResult, TestResult, TestBeforeResult, TestAfterResult
-from allure_commons.model2 import TestResultContainer
+from allure_commons.model2 import TestResultContainer, ExecutableItem
 from allure_commons.model2 import StatusDetails
 from allure_commons.model2 import Parameter
 from allure_commons.model2 import Label, Link
 from allure_commons.model2 import Status
-from allure_commons.types import LabelType
+from allure_commons.types import LabelType, Severity
 from allure_pytest.utils import allure_labels, allure_links, pytest_markers
 from allure_pytest.utils import allure_full_name, allure_package, allure_name
 from allure_pytest.utils import get_status, get_status_details
@@ -20,119 +21,147 @@ from allure_pytest.utils import get_outcome_status, get_outcome_status_details
 
 from robot.libraries.BuiltIn import BuiltIn
 
+
 class AllureListener(object):
     ROBOT_LISTENER_API_VERSION = 2
 
-    def __init__(self, source='Listener'):
+    def __init__(self, outputDir=None):
         self.allure_logger = AllureReporter()
+        if outputDir is None:
+            outputDir = './allure-log'
+        self.fileLogger = AllureFileLogger(outputDir)
         self._cache = ItemCache()
         self._host = host_tag()
         self._thread = thread_tag()
-        # Setting this variable prevents the loading of a Library added Listener.
-        # I case the Listener is added via Command Line, the Robot Context is not
-        # yet there and will cause an exceptions. Similar section in start_suite.
-        try:
-            AllureListenerActive = BuiltIn().get_variable_value('${ALLURE}', false)
-            BuiltIn().set_global_variable('${ALLURE}', True)
-
-        except:
-            pass
-
-    @allure_commons.hookimpl
-    def start_step(self, uuid, title, params):
-        parameters = [Parameter(name=name, value=value) for name, value in params]
-        step = TestStepResult(name=title, start=now(), parameters=parameters)
-        self.allure_logger.start_step(None, uuid, step)
-
-    @allure_commons.hookimpl
-    def stop_test(self, uuid, exc_type, exc_val, exc_tb):
-        self.allure_logger.stop_step(uuid,
-                                     stop=now(),
-                                     status=get_status(exc_val),
-                                     statusDetails=get_status_details(exc_type, exc_val, exc_tb))
-
-    @allure_commons.hookimpl
-    def start_fixture(self, parent_uuid, uuid, name):
-        after_fixture = TestAfterResult(name=name, start=now())
-        self.allure_logger.start_after_fixture(parent_uuid, uuid, after_fixture)
-
-    @allure_commons.hookimpl
-    def stop_fixture(self, parent_uuid, uuid, name, exc_type, exc_val, exc_tb):
-        self.allure_logger.stop_after_fixture(uuid,
-                                              stop=now(),
-                                              status=get_status(exc_val),
-                                              statusDetails=get_status_details(exc_type, exc_val, exc_tb))
-
-    def pytest_runtest_protocol(self, item, nextitem):
-        uuid = self._cache.set(item.nodeid)
-        for fixturedef in _test_fixtures(item):
-            group_uuid = self._cache.get(fixturedef)
-            if not group_uuid:
-                group_uuid = self._cache.set(fixturedef)
-                group = TestResultContainer(uuid=group_uuid)
-                self.allure_logger.start_group(group_uuid, group)
-            self.allure_logger.update_group(group_uuid, children=uuid)
-
-        test_case = TestResult(name=allure_name(item), uuid=uuid)
-        self.allure_logger.schedule_test(uuid, test_case)
-
-        if hasattr(item, 'function'):
-            test_case.description = item.function.__doc__
-
-        yield
-
-        for name, value in item.callspec.params.items() if hasattr(item, 'callspec') else ():
-            test_result = self.allure_logger.get_test(uuid)
-            if test_result:
-                test_result.parameters.append(Parameter(name, represent(value)))
-
-        test_case.labels.extend([Label(name=name, value=value) for name, value in allure_labels(item)])
-        test_case.labels.extend([Label(name=LabelType.TAG, value=value) for value in pytest_markers(item)])
-        test_case.labels.append(Label(name=LabelType.HOST, value=self._host))
-        test_case.labels.append(Label(name=LabelType.THREAD, value=self._thread))
-        test_case.labels.append(Label(name=LabelType.FRAMEWORK, value='robotframework'))
-        test_case.labels.append(Label(name=LabelType.LANGUAGE, value=platform_label()))
-
-        test_case.links += [Link(link_type, url, name) for link_type, url, name in allure_links(item)]
-
-        test_case.fullName = allure_full_name(item)
-        test_case.historyId = md5(test_case.fullName)
-        test_case.labels.append(Label('package', allure_package(item)))
-
-        uuid = self._cache.pop(item.nodeid)
-        self.allure_logger.close_test(uuid)
-
-    def pytest_runtest_call(self, item):
-        uuid = self._cache.get(item.nodeid)
-        test_result = self.allure_logger.get_test(uuid)
-        if test_result:
-            test_result.start = now()
-
-        yield
-
-        if test_result:
-            test_result.stop = now()
+        self._currentTest = None
+        allure_commons.plugin_manager.register(self.fileLogger)
 
     def start_suite(self, name, attributes):
-        pass
+        print '\nSTART SUITE'
+        print attributes
+
+        suite_uuid = self._cache.set(attributes['id'])
+
+        if len(attributes['id'].split('-')) > 1:
+            # update parent group
+            parent = self._cache.get('-'.join(attributes['id'].split('-')[:-1]))
+            self.allure_logger.update_group(uuid=parent, children=suite_uuid)
+
+        group = TestResultContainer(uuid=suite_uuid, name=name, description=attributes['doc'],
+                                    start=now())
+        self.allure_logger.start_group(uuid=suite_uuid, group=group)
 
     def end_suite(self, name, attributes):
-        pass
+        print '\nEND SUITE'
+        print attributes
+        suite_uuid = self._cache.pop(attributes['id'])
+        self.allure_logger.stop_group(uuid=suite_uuid, stop=now())
 
     def start_test(self, name, attributes):
-        pass
+        print '\nSTART TEST'
+        print attributes
+
+        severitySet = False
+        test_uuid = self._cache.set(attributes['id'])
+
+        ancestors = []
+        parentId = '-'.join(attributes['id'].split('-')[:-1])
+        tmp = attributes['id']
+        while parentId != tmp:
+            ancestors.insert(0, self.allure_logger.get_item(self._cache.get(parentId)).name)
+            tmp = parentId
+            parentId = '-'.join(parentId.split('-')[:-1]) if len(parentId.split('-')) > 1 else parentId
+
+        parent = self._cache.get('-'.join(attributes['id'].split('-')[:-1]))
+        self.allure_logger.update_group(uuid=parent, children=test_uuid)
+
+        full_name = '.'.join(ancestors) + '#' + name
+
+        test_case = TestResult(uuid=test_uuid, name=name, fullName=full_name, start=now())
+
+        for t in attributes['tags']:
+            s = t.split('.')
+            if s[0] == 'allure_severity':
+                test_case.labels.append(Label(name=LabelType.SEVERITY, value=s[1]))
+                severitySet = True
+            elif s[0] == 'allure_feature':
+                test_case.labels.append(Label(name='feature', value='.'.join(s[1:])))
+            else:
+                test_case.labels.append(Label(name='tag', value='.'.join(s)))
+
+        if not severitySet:
+            test_case.labels.append(Label(name=LabelType.SEVERITY, value=Severity.NORMAL))
+
+        test_case.labels.append(Label(name=LabelType.HOST, value=self._host))
+        test_case.labels.append(Label(name=LabelType.THREAD, value=self._thread))
+        test_case.labels.append(Label(name=LabelType.FRAMEWORK, value='robot-framework'))
+        test_case.labels.append(Label(name=LabelType.LANGUAGE, value=platform_label()))
+
+        test_case.labels.append(Label('package', '.'.join(ancestors)))
+        test_case.labels.append(Label('testClass', '.'.join(ancestors)))
+        test_case.labels.append(Label('parentSuite', '.'.join(ancestors[:-1])))
+        test_case.labels.append(Label('suite', ancestors[-1]))
+        test_case.labels.append(Label('story', name))
+
+        test_case.historyId = md5(test_case.fullName)
+
+        self.allure_logger.schedule_test(uuid=test_uuid, test_case=test_case)
+        self._currentTest = test_uuid
 
     def end_test(self, name, attributes):
-        pass
+        print '\nEND TEST'
+        print attributes
+
+        test_uuid = self._cache.pop(attributes['id'])
+        test_case = self.allure_logger.get_test(test_uuid)
+        test_case.status = Status.FAILED if attributes['status'] == 'FAIL' else Status.PASSED
+        if attributes['status'] == 'PASS':
+            test_case.status = Status.PASSED
+        elif attributes['status'] == 'FAIL':
+            test_case.status = Status.FAILED
+        else:
+            attributes['status'] = Status.UNKNOWN
+
+        test_case.statusDetails = StatusDetails(message=attributes['message'])
+        test_case.stop = now()
+
+        self._currentTest = None
+        self.allure_logger.close_test(test_uuid)
 
     def start_keyword(self, name, attributes):
-        pass
+        print '\nSTART KEYWORD'
+        print attributes
+
+        keyword_uuid = self._cache.set(name)
+        kw = TestStepResult(id=keyword_uuid, name=name, description=attributes['doc'], start=now())
+
+        if self._currentTest is None:
+            # Must be a suite setup or teardown keyword
+            parent = self.allure_logger.get_last_item(TestResultContainer).uuid
+            if attributes['type'] == 'Setup':
+                self.allure_logger.start_before_fixture(parent_uuid=parent, uuid=keyword_uuid, fixture=kw)
+            else:
+                if attributes['type'] == 'Teardown':
+                    self.allure_logger.start_after_fixture(parent_uuid=parent, uuid=keyword_uuid, fixture=kw)
+                else:
+                    # must be a keyword inside another keyword
+                    parent = self.allure_logger.get_last_item(TestStepResult).id
+                    self.allure_logger.start_step(parent, keyword_uuid, kw)
+        else:
+            self.allure_logger.start_step(self._currentTest, keyword_uuid, kw)
 
     def end_keyword(self, name, attributes):
-        pass
+        print '\nEND KEYWORD'
+        print attributes
+        keyword_uuid = self._cache.pop(name)
+        self.allure_logger.stop_step(uuid=keyword_uuid,id=None,
+                                     status=Status.FAILED if attributes['status'] == 'FAIL' else Status.PASSED,
+                                     stage='finished' if attributes['status'] == 'PASS' else 'interrupted',
+                                     stop=now())
 
     def log_message(self, message):
-        pass
+        print '\nLOG MESSAGE'
+        print message
 
     def message(self, message):
         pass
@@ -144,85 +173,7 @@ class AllureListener(object):
         pass
 
     def close(self):
-        pass
-
-    @pytest.hookimpl(hookwrapper=True)
-    def pytest_fixture_setup(self, fixturedef, request):
-        fixture_name = fixturedef.argname
-
-        container_uuid = self._cache.get(fixturedef)
-
-        if not container_uuid:
-            container_uuid = self._cache.set(fixturedef)
-            container = TestResultContainer(uuid=container_uuid)
-            self.allure_logger.start_group(container_uuid, container)
-
-        self.allure_logger.update_group(container_uuid, start=now())
-
-        before_fixture_uuid = uuid4()
-        before_fixture = TestBeforeResult(name=fixture_name, start=now())
-        self.allure_logger.start_before_fixture(container_uuid, before_fixture_uuid, before_fixture)
-
-        outcome = yield
-
-        self.allure_logger.stop_before_fixture(before_fixture_uuid,
-                                               stop=now(),
-                                               status=get_outcome_status(outcome),
-                                               statusDetails=get_outcome_status_details(outcome))
-        finalizers = fixturedef._finalizer if hasattr(fixturedef, 'finalizer') else fixturedef._finalizers
-        for index, finalizer in enumerate(finalizers or ()):
-            name = '{fixture}::{finalizer}'.format(fixture=fixturedef.argname, finalizer=finalizer.__name__)
-            finalizers[index] = allure_commons.fixture(finalizer, parent_uuid=container_uuid, name=name)
-
-    @pytest.hookimpl(hookwrapper=True)
-    def pytest_fixture_post_finalizer(self, fixturedef):
-        yield
-        if hasattr(fixturedef, 'cached_result') and self._cache.get(fixturedef):
-            container_uuid = self._cache.pop(fixturedef)
-            self.allure_logger.stop_group(container_uuid, stop=now())
-
-    @pytest.hookimpl(hookwrapper=True)
-    def pytest_runtest_makereport(self, item, call):
-        uuid = self._cache.set(item.nodeid)
-        report = (yield).get_result()
-        allure_item = self.allure_logger.get_item(uuid)
-        status = allure_item.status or None
-        status_details = None
-
-        if call.excinfo and hasattr(call.excinfo.value, 'msg'):
-            status_details = StatusDetails(message=call.excinfo.value.msg)
-        elif hasattr(report, 'wasxfail'):
-            status_details = StatusDetails(message=report.wasxfail)
-        elif report.failed:
-            status_details = StatusDetails(message=call.excinfo.exconly(), trace=report.longreprtext)
-
-        if report.when == 'setup':
-            if report.passed:
-                status = Status.PASSED
-            if report.failed:
-                status = Status.BROKEN
-            if report.skipped:
-                status = Status.SKIPPED
-
-        if report.when == 'call':
-            if report.passed and status == Status.PASSED:
-                pass
-            if report.failed:
-                status = Status.FAILED
-            if report.skipped:
-                status = Status.SKIPPED
-
-        if report.when == 'teardown':
-            if report.failed and status == Status.PASSED:
-                status = Status.BROKEN
-
-        test_result = self.allure_logger.get_test(uuid)
-        if test_result:
-            if status_details:
-                test_result.status = status
-                test_result.statusDetails = status_details
-            else:
-                test_result.status = status
+        print '\nEND EXECUTION'
 
     @allure_commons.hookimpl
     def attach_data(self, body, name, attachment_type, extension):
@@ -258,16 +209,3 @@ class ItemCache(object):
 
     def pop(self, _id):
         return self._items.pop(str(_id))
-
-
-def _test_fixtures(item):
-    fixturemanager = item.session._fixturemanager
-    fixturedefs = []
-
-    if hasattr(item, "fixturenames"):
-        for name in item.fixturenames:
-            fixturedef = fixturemanager.getfixturedefs(name, item.nodeid)
-            if fixturedef:
-                fixturedefs.append(fixturedef[-1])
-
-    return fixturedefs
