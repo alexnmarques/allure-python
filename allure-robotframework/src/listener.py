@@ -13,22 +13,18 @@ from allure_commons.model2 import StatusDetails
 from allure_commons.model2 import Parameter
 from allure_commons.model2 import Label, Link
 from allure_commons.model2 import Status
-from allure_commons.types import LabelType, Severity
-from allure_pytest.utils import allure_labels, allure_links, pytest_markers
-from allure_pytest.utils import allure_full_name, allure_package, allure_name
-from allure_pytest.utils import get_status, get_status_details
-from allure_pytest.utils import get_outcome_status, get_outcome_status_details
+from allure_commons.types import LabelType, Severity, LinkType, AttachmentType
 
-from robot.libraries.BuiltIn import BuiltIn
-
+import re
 
 class AllureListener(object):
     ROBOT_LISTENER_API_VERSION = 2
 
     def __init__(self, outputDir=None):
         self.allure_logger = AllureReporter()
-        if outputDir is None:
-            outputDir = './allure-log'
+        self._outputDir = outputDir
+        if self._outputDir is None:
+            self._outputDir = './allure-log'
         self.fileLogger = AllureFileLogger(outputDir)
         self._cache = ItemCache()
         self._host = host_tag()
@@ -37,9 +33,6 @@ class AllureListener(object):
         allure_commons.plugin_manager.register(self.fileLogger)
 
     def start_suite(self, name, attributes):
-        print '\nSTART SUITE'
-        print attributes
-
         suite_uuid = self._cache.set(attributes['id'])
 
         if len(attributes['id'].split('-')) > 1:
@@ -52,15 +45,10 @@ class AllureListener(object):
         self.allure_logger.start_group(uuid=suite_uuid, group=group)
 
     def end_suite(self, name, attributes):
-        print '\nEND SUITE'
-        print attributes
         suite_uuid = self._cache.pop(attributes['id'])
         self.allure_logger.stop_group(uuid=suite_uuid, stop=now())
 
     def start_test(self, name, attributes):
-        print '\nSTART TEST'
-        print attributes
-
         severitySet = False
         test_uuid = self._cache.set(attributes['id'])
 
@@ -109,9 +97,6 @@ class AllureListener(object):
         self._currentTest = test_uuid
 
     def end_test(self, name, attributes):
-        print '\nEND TEST'
-        print attributes
-
         test_uuid = self._cache.pop(attributes['id'])
         test_case = self.allure_logger.get_test(test_uuid)
         test_case.status = Status.FAILED if attributes['status'] == 'FAIL' else Status.PASSED
@@ -129,11 +114,11 @@ class AllureListener(object):
         self.allure_logger.close_test(test_uuid)
 
     def start_keyword(self, name, attributes):
-        print '\nSTART KEYWORD'
-        print attributes
-
         keyword_uuid = self._cache.set(name)
         kw = TestStepResult(id=keyword_uuid, name=name, description=attributes['doc'], start=now())
+
+        for arg in attributes['args']:
+            kw.parameters.append(Parameter(value=arg))
 
         if self._currentTest is None:
             # Must be a suite setup or teardown keyword
@@ -151,17 +136,36 @@ class AllureListener(object):
             self.allure_logger.start_step(self._currentTest, keyword_uuid, kw)
 
     def end_keyword(self, name, attributes):
-        print '\nEND KEYWORD'
-        print attributes
         keyword_uuid = self._cache.pop(name)
-        self.allure_logger.stop_step(uuid=keyword_uuid,id=None,
+        self.allure_logger.stop_step(uuid=keyword_uuid, id=None,
                                      status=Status.FAILED if attributes['status'] == 'FAIL' else Status.PASSED,
                                      stage='finished' if attributes['status'] == 'PASS' else 'interrupted',
                                      stop=now())
 
     def log_message(self, message):
-        print '\nLOG MESSAGE'
-        print message
+        # Any URL pattern will be added as link to the context
+        links = re.findall('http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\(\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+',
+                           message['message'])
+        # Screenshots in Selenium2Library and AppiumLibrary will be logged in HTML snippets
+        files = re.findall('<a href=\"([^\"]*)\">', message['message'])
+
+        if len(links) == 0 and len(files) == 0:
+            # If no patterns extracted, add data as attachment
+            if not message['message'].startswith('LOG MESSAGE'):
+                self.attach_data(message['message'], 'Log', 'text/plain')
+        else:
+            if self._currentTest is None:
+                # Get current TestResultContainer
+                test = self.allure_logger.get_last_item(TestResultContainer)
+            else:
+                # Get current TestResult
+                test = self.allure_logger.get_item(self._currentTest)
+            for l in links:
+                test.links.append(Link(LinkType.LINK, l))
+
+            for f in files:
+                #All Selenium2Library and AppiumLibrary screenshots are PNG
+                self.attach_file(f, attachment_type=AttachmentType.PNG)
 
     def message(self, message):
         pass
@@ -173,14 +177,14 @@ class AllureListener(object):
         pass
 
     def close(self):
-        print '\nEND EXECUTION'
+        print '\nTest execution ended. to generate the report run:\n    allure generate ' + self._outputDir
 
     @allure_commons.hookimpl
-    def attach_data(self, body, name, attachment_type, extension):
+    def attach_data(self, body, name=None, attachment_type=None, extension=None):
         self.allure_logger.attach_data(uuid4(), body, name=name, attachment_type=attachment_type, extension=extension)
 
     @allure_commons.hookimpl
-    def attach_file(self, source, name, attachment_type, extension):
+    def attach_file(self, source, name=None, attachment_type=None, extension=None):
         self.allure_logger.attach_file(uuid4(), source, name=name, attachment_type=attachment_type, extension=extension)
 
     @allure_commons.hookimpl
